@@ -22,6 +22,7 @@ function App() {
   >([])
   const [historyIndex, setHistoryIndex] = useState<number>(-1)
   const [thumbnails, setThumbnails] = useState<string[]>([])
+  const [showThumbnails, setShowThumbnails] = useState(false)
   const objectUrlRef = useRef<string | null>(null)
   const pageViewportRef = useRef<HTMLDivElement | null>(null)
 
@@ -67,36 +68,63 @@ function App() {
   useEffect(() => {
     if (!fileUrl || !numPages) return
     let isCancelled = false
-    pdfjs.getDocument(fileUrl).promise.then(async (pdf: any) => {
-      for (let i = 1; i <= numPages; i++) {
+    let activeUrls: string[] = []
+    const concurrency = 2 // Limit concurrent renders
+    const queue: number[] = Array.from({ length: numPages }, (_, i) => i + 1)
+    let running = 0
+    let pdfDoc: any = null
+
+    // Fetch the PDF document once
+    pdfjs.getDocument(fileUrl).promise.then((pdf: any) => {
+      if (isCancelled) return
+      pdfDoc = pdf
+      for (let j = 0; j < concurrency; j++) processQueue()
+    })
+
+    const processQueue = async () => {
+      while (running < concurrency && queue.length && !isCancelled && pdfDoc) {
+        const i = queue.shift()!
+        running++
         try {
-          const page = await pdf.getPage(i)
-          const viewport = page.getViewport({ scale: 0.12 })
+          const page = await pdfDoc.getPage(i)
+          const viewport = page.getViewport({ scale: 0.08 })
           const canvas = document.createElement('canvas')
           canvas.width = viewport.width
           canvas.height = viewport.height
           const ctx = canvas.getContext('2d')
-          if (!ctx) continue
+          if (!ctx) return
           await page.render({ canvasContext: ctx, viewport }).promise
-          const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png', 0.2))
+          const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.15))
           if (blob) {
             const objectUrl = URL.createObjectURL(blob)
+            activeUrls[i - 1] = objectUrl
             if (!isCancelled) {
               setThumbnails((prev) => {
+                if (prev[i - 1]) URL.revokeObjectURL(prev[i - 1])
                 const next = [...prev]
                 next[i - 1] = objectUrl
                 return next
               })
+            } else {
+              URL.revokeObjectURL(objectUrl)
             }
           }
         } catch (err) {
           // skip on error
+        } finally {
+          running--
+          if (!isCancelled) processQueue()
         }
       }
-    })
+    }
+
     return () => {
       isCancelled = true
-      setThumbnails([])
+      setThumbnails((prev) => {
+        prev.forEach((url) => url && URL.revokeObjectURL(url))
+        return []
+      })
+      activeUrls.forEach((url) => url && URL.revokeObjectURL(url))
     }
   }, [fileUrl, numPages])
 
@@ -245,57 +273,62 @@ function App() {
           onLoadError={(e) => console.error(e)}
         >
           <div style={{ display: 'flex', gap: 16 }}>
-            <aside
-              style={{
-                width: 150,
-                maxHeight: '75vh',
-                overflowY: 'auto',
-                border: '1px solid #e5e7eb',
-                borderRadius: 8,
-                padding: 8
-              }}
-            >
-              {numPages ? (
-                Array.from({ length: numPages }, (_, i) => i + 1).map((n) => (
-                  <button
-                    key={n}
-                    onClick={() => setPageNumber(n)}
-                    style={{
-                      display: 'block',
-                      width: '100%',
-                      background: 'transparent',
-                      border: 'none',
-                      padding: 0,
-                      marginBottom: 8,
-                      cursor: 'pointer',
-                      outline: 'none'
-                    }}
-                    aria-label={`Go to page ${n}`}
-                  >
-                    <div
+            {showThumbnails && (
+              <aside
+                style={{
+                  width: 150,
+                  maxHeight: '75vh',
+                  overflowY: 'auto',
+                  border: '1px solid #e5e7eb',
+                  borderRadius: 8,
+                  padding: 8
+                }}
+              >
+                {numPages ? (
+                  Array.from({ length: numPages }, (_, i) => i + 1).map((n) => (
+                    <button
+                      key={n}
+                      onClick={() => setPageNumber(n)}
                       style={{
-                        border: n === pageNumber ? '2px solid #3b82f6' : '1px solid #e5e7eb',
-                        borderRadius: 6,
-                        padding: 4,
-                        background: '#fff'
+                        display: 'block',
+                        width: '100%',
+                        background: 'transparent',
+                        border: 'none',
+                        padding: 0,
+                        marginBottom: 8,
+                        cursor: 'pointer',
+                        outline: 'none'
                       }}
+                      aria-label={`Go to page ${n}`}
                     >
-                      {thumbnails[n - 1] ? (
-                        <img src={thumbnails[n - 1]} alt={`Thumbnail page ${n}`} style={{ width: 120, height: 'auto', display: 'block', filter: 'blur(0.5px)' }} />
-                      ) : (
-                        <div style={{ width: 120, height: 160, background: '#f3f4f6', color: '#6b7280', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>Loading…</div>
-                      )}
-                      <div style={{ textAlign: 'center', fontSize: 12, marginTop: 4 }}>Page {n}</div>
-                    </div>
-                  </button>
-                ))
-              ) : (
-                <div style={{ padding: 8, color: '#6b7280' }}>Loading thumbnails…</div>
-              )}
-            </aside>
+                      <div
+                        style={{
+                          border: n === pageNumber ? '2px solid #3b82f6' : '1px solid #e5e7eb',
+                          borderRadius: 6,
+                          padding: 4,
+                          background: '#fff'
+                        }}
+                      >
+                        {thumbnails[n - 1] ? (
+                          <img src={thumbnails[n - 1]} alt={`Thumbnail page ${n}`} style={{ width: 120, height: 'auto', display: 'block', filter: 'blur(0.5px)' }} />
+                        ) : (
+                          <div style={{ width: 120, height: 160, background: '#f3f4f6', color: '#6b7280', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>Loading…</div>
+                        )}
+                        <div style={{ textAlign: 'center', fontSize: 12, marginTop: 4 }}>Page {n}</div>
+                      </div>
+                    </button>
+                  ))
+                ) : (
+                  <div style={{ padding: 8, color: '#6b7280' }}>Loading thumbnails…</div>
+                )}
+              </aside>
+            )}
 
             <section style={{ flex: 1 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+                <button onClick={() => setShowThumbnails((v) => !v)} aria-pressed={showThumbnails}>
+                  {showThumbnails ? 'Hide' : 'Show'} Thumbnails
+                </button>
                 <button onClick={() => setPageNumber((p) => Math.max(p - 1, 1))} disabled={!canGoPrev}>
                   Prev
                 </button>
